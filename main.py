@@ -1,86 +1,124 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 import random
+import string
 import time
+import os
 
 app = FastAPI()
 
-# ====== DATA STORE ======
-API_KEYS = {
-    "OWNER_KEY": {"limit": 1000, "used": 0}
-}
-
+# ===== DATABASE (Temporary memory store) =====
+users = {}
 otp_store = {}
-logs = []
+api_keys = {}
 
-# ====== KEY CHECK FUNCTION ======
-def check_key(key):
-    if key not in API_KEYS:
-        return False
-    if API_KEYS[key]["used"] >= API_KEYS[key]["limit"]:
-        return False
-    API_KEYS[key]["used"] += 1
-    return True
+# ===== CONFIG =====
+ADMIN_KEY = "PRINCE_ADMIN_123"   # change later
 
-# ====== HOME ======
+# ===== FUNCTIONS =====
+def generate_otp():
+    return ''.join(random.choices(string.digits, k=6))
+
+def generate_api_key():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+
+
+# =========================
+# ROOT CHECK
+# =========================
 @app.get("/")
 def home():
-    return {"status": "Prince API Live 🚀"}
+    return {"status": "API Running Successfully 🚀"}
 
-# ====== CREATE NEW API KEY ======
-@app.get("/create-key")
-def create_key():
-    new_key = "PRINCE" + str(random.randint(10000, 99999))
-    API_KEYS[new_key] = {"limit": 100, "used": 0}
-    return {"api_key": new_key}
 
-# ====== SEND OTP ======
-@app.get("/send-otp")
-def send_otp(number: str, key: str):
-    if not check_key(key):
-        return {"status": False, "message": "Invalid or Limit Exceeded"}
+# =========================
+# REGISTER USER
+# =========================
+@app.post("/register")
+async def register(req: Request):
+    data = await req.json()
+    user = data.get("user")
 
-    otp = random.randint(100000, 999999)
-    otp_store[number] = {
-        "otp": otp,
-        "expire": time.time() + 120
-    }
+    if not user:
+        raise HTTPException(status_code=400, detail="User required")
 
-    logs.append({
-        "action": "send",
-        "number": number,
-        "time": time.ctime()
-    })
+    otp = generate_otp()
+    otp_store[user] = {"otp": otp, "time": time.time()}
 
-    return {"status": True, "otp": otp}
+    return {"otp": otp, "msg": "OTP Generated"}
 
-# ====== VERIFY OTP ======
-@app.get("/verify-otp")
-def verify_otp(number: str, otp: int, key: str):
-    if not check_key(key):
-        return {"status": False, "message": "Invalid or Limit Exceeded"}
 
-    if number not in otp_store:
-        return {"status": False, "message": "No OTP Found"}
+# =========================
+# VERIFY OTP
+# =========================
+@app.post("/verify")
+async def verify(req: Request):
+    data = await req.json()
+    user = data.get("user")
+    otp = data.get("otp")
 
-    data = otp_store[number]
+    if user not in otp_store:
+        raise HTTPException(status_code=400, detail="OTP expired or not found")
 
-    if time.time() > data["expire"]:
-        return {"status": False, "message": "OTP Expired"}
+    saved = otp_store[user]
 
-    if data["otp"] != otp:
-        return {"status": False, "message": "Wrong OTP"}
+    if time.time() - saved["time"] > 120:
+        del otp_store[user]
+        raise HTTPException(status_code=400, detail="OTP expired")
 
-    logs.append({
-        "action": "verify",
-        "number": number,
-        "time": time.ctime()
-    })
+    if otp != saved["otp"]:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    return {"status": True, "message": "Verified Successfully"}
+    key = generate_api_key()
+    api_keys[key] = user
+    users[user] = {"api_key": key}
 
-# ====== VIEW LOGS (OWNER ONLY) ======
-@app.get("/logs")
-def view_logs(key: str):
-    if key != "OWNER_KEY":
-        return {"status": "Access Denied"}
-    return logs
+    del otp_store[user]
+
+    return {"status": "verified", "api_key": key}
+
+
+# =========================
+# USER INFO
+# =========================
+@app.get("/me")
+def me(api_key: str):
+    if api_key not in api_keys:
+        raise HTTPException(status_code=401, detail="Invalid key")
+
+    return {"user": api_keys[api_key]}
+
+
+# =========================
+# ADMIN PANEL
+# =========================
+@app.get("/admin/users")
+def admin_users(admin_key: str):
+    if admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Not admin")
+
+    return {"total_users": len(users), "users": users}
+
+
+# =========================
+# DELETE USER (ADMIN)
+# =========================
+@app.delete("/admin/delete")
+def delete_user(user: str, admin_key: str):
+    if admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Not admin")
+
+    if user in users:
+        del users[user]
+        return {"deleted": user}
+
+    return {"msg": "User not found"}
+
+
+# =========================
+# START SERVER (RAILWAY FIX)
+# =========================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
